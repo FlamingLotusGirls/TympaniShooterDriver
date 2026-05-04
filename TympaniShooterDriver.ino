@@ -1,121 +1,191 @@
+/*
+* Egg Shooter control box
+ */
 
-int oPurge = 7;
-int oLiq = 8;
-int oDammitBuffy = 9;
-int iShoot = 2;
-int iFountain = 3;
-int iDammitBuffy = 4;
-int iDelayPot = 5;
+const int NUM_SHOOTERS = 6;
+const unsigned long MIN_PURGE_DELAY = 250; // milliseconds
+const unsigned long MAX_PURGE_DELAY = 4000; // milliseconds
+const unsigned long SIGNAL_INTERVAL = 300; //milliseconds
+const unsigned long ACTIVITY_BLINK_TIME = 50; //milliseconds.  how long to modulate the activity indicator when serial messages are sent.
 
-#define MINFOUNTPURGE 500 //min purge for fountain mode in ms
-#define MAXFOUNTPURGE 6000 //max purge for fountain mode in ms
+// Pins for LEDs
+const int LED_1 = 13;
+const int LED_2 = 12;
+const int LED_3 = 11;
 
-#define MINSHOOTPURGE 500 //min purge for shooter mode in ms
-#define MAXSHOOTPURGE 3000 //min purge for shooter mode in ms
+// LED State
+//boolean led_1;
+boolean led_2;
+boolean led_3;
+unsigned long activity_until = millis(); // If this is greater than the current time, serial activity is happening.
 
-#define DEBOUNCEDELAY 50 // ms delay in responding to inputs
-#define PURGEOFFTHRESHHOMLD 50 //input of the delay pot reads from 0 to 1023; this is the cutoff below which the purge is off
+// Addresses for Relay Boxes
+const String BOX1 = "0e";
+const String BOX2 = "0f";
 
-unsigned long deBounceTimeOut[4];
-unsigned long purgeOffTime = 0;
+// Addresses for individual switched outlets
+const String FUEL1 = BOX1 + "1";
+const String FUEL2 = BOX1 + "2";
+const String FUEL3 = BOX1 + "3";
+const String PURGE1 = BOX1 + "4";
+const String PURGE2 = BOX1 + "5";
+const String PURGE3 = BOX1 + "6";
 
-int liqState = LOW;
-int purgeState = LOW;
-int mode = 0;
-int deBounceWait[4];
-int lastState[4];
+const String FUEL4 = BOX2 + "1";
+const String FUEL5 = BOX2 + "2";
+const String FUEL6 = BOX2 + "3";
+const String PURGE4 = BOX2 + "4";
+const String PURGE5 = BOX2 + "5";
+const String PURGE6 = BOX2 + "6";
 
-void setup (){
-  pinMode(iShoot, INPUT);
-  pinMode(iFountain, INPUT);
-  pinMode(iDammitBuffy, INPUT);  
-  pinMode(oPurge, OUTPUT);
-  pinMode(oLiq, OUTPUT);
-  pinMode(oDammitBuffy, OUTPUT);
-  digitalWrite(oPurge, LOW);
-  digitalWrite(oLiq, LOW);
-  for (int i=0; i<4; i++){
-    deBounceTimeOut[i] = 0;
-    deBounceWait[i] = false;
-    lastState[i] = LOW;
+typedef struct Shooter{
+  int button_pin;
+  String fuel_address;
+  String purge_address;
+};
+
+Shooter shooters[] = {
+  {2, FUEL1, PURGE1},
+  {3, FUEL2, PURGE2},
+  {4, FUEL3, PURGE3},
+  {5, FUEL4, PURGE4},
+  {6, FUEL5, PURGE5},
+  {7, FUEL6, PURGE6},
+};
+
+const int PURGE_BUTTON_PIN = 8;
+const int PURGE_DELAY_PIN = A0; // Analog pin for the knob
+
+boolean last_button_state[NUM_SHOOTERS];
+boolean last_purge_button_state;
+
+//unsigned long purge_off_time[NUM_SHOOTERS];
+unsigned long button_off_time[NUM_SHOOTERS];
+unsigned long last_signal_sent[NUM_SHOOTERS];
+unsigned long last_purge_all_signal = 0;
+
+boolean last_fuel_valve_state[NUM_SHOOTERS];
+boolean last_purge_valve_state[NUM_SHOOTERS];
+boolean purge_init[NUM_SHOOTERS];
+
+
+int delay_knob_min_value, delay_knob_max_value;
+unsigned long purge_delay = MIN_PURGE_DELAY; // start it at the minimum value.
+
+void setup() {
+  Serial.begin(19200);
+
+  pinMode(LED_1, OUTPUT); 
+  pinMode(LED_2, OUTPUT); 
+  pinMode(LED_3, OUTPUT); 
+  digitalWrite(LED_1, HIGH); // Power light!
+
+  pinMode(PURGE_DELAY_PIN, INPUT);
+  pinMode(PURGE_BUTTON_PIN, INPUT);
+  digitalWrite(PURGE_BUTTON_PIN, HIGH);
+  last_purge_button_state = (digitalRead(PURGE_BUTTON_PIN) == LOW);
+
+  for (int i=0; i<NUM_SHOOTERS; i++) {
+    last_fuel_valve_state[i] = false;
+    last_purge_valve_state[i] = false;
+    pinMode(shooters[i].button_pin, INPUT);
+    digitalWrite(shooters[i].button_pin, HIGH);  // This activates the internal pull-up resistor.
+    last_button_state[i] = (digitalRead(shooters[i].button_pin) == LOW);
+    button_off_time[i] = millis() - 1500; // Prevents purge valves from firing on boot.
+    purge_init[i] = false;
   }
 }
 
-void loop(){
-  switch(mode){
-    case 0: //nothing happening
-      liqState = LOW;
-      purgeState = LOW;
-      if (isPressed(iFountain)){
-        mode = 1;
-      }
-      if (isPressed(iShoot)){
-        mode = 2;
-      }
-      break;  
-    case 1: //fountain
-      liqState = HIGH;
-      purgeState = LOW;
-      if (!isPressed(iFountain)){
-        if (analogRead(iDelayPot) >= PURGEOFFTHRESHHOMLD){    
-          purgeOffTime = millis() + map(analogRead(iDelayPot), PURGEOFFTHRESHHOMLD, 1023, MINFOUNTPURGE, MAXFOUNTPURGE);
-          mode = 3;
-        }
-        else {
-          mode = 0;
-        }
-      }
-      break;
-    case 2: //liquid shooter
-      liqState = HIGH;
-      purgeState = LOW;
-      if (!isPressed(iShoot)){
-        if (analogRead(iDelayPot) >= PURGEOFFTHRESHHOMLD){
-          purgeOffTime = millis() + map(analogRead(iDelayPot), PURGEOFFTHRESHHOMLD, 1023, MINSHOOTPURGE, MAXSHOOTPURGE);
-          mode = 3;
-        }
-        else {
-          mode = 0;
-        }
-      }
-      break;
-    case 3: // purge
-      liqState = LOW;
-      purgeState = HIGH;
-      if (millis() > purgeOffTime){
-        mode = 0;
-      }  
-      break;
-  }
-  digitalWrite (oPurge, purgeState);
-  digitalWrite (oLiq, liqState);
-  if (digitalRead(iDammitBuffy)){
-    digitalWrite (oDammitBuffy, HIGH);
-  }
-  else {
-    digitalWrite (oDammitBuffy, LOW);
-  }    
-}
 
-int isPressed (int input){ // debounces inputs and returns the state of the input after debouncing
-  int currentState = digitalRead(input);
-  if (deBounceWait[input]){
-    if (currentState == lastState[input]){
-      deBounceWait[input] = false;
+void loop() {
+
+  //led_1 = false; // using this as a power indicator
+  led_2 = false;
+  led_3 = false;
+
+  unsigned long purge_delay = getPurgeDelay();
+  boolean purge_button_pressed = (digitalRead(PURGE_BUTTON_PIN) == LOW);
+  if ( purge_button_pressed) {
+    purgeAll( !last_purge_button_state );
+    led_3 = true;
+  }
+  last_purge_button_state = purge_button_pressed;
+  
+
+  for (int i=0; i<NUM_SHOOTERS; i++) {
+    boolean button_pressed = ( digitalRead(shooters[i].button_pin) == LOW );// LOW means the switch is closed.
+    if (button_pressed) {
+      purge_init[i] = true;
+      led_2 = true;
+      // send the signal immediately if this is the first loop since state transition
+      // send the signal periodically otherwise.
+      fuelSignal(i, 1, !last_button_state[i]); // fuel on
+      purgeSignal(i, 0, !last_button_state[i]); // purge off
+    } else {
+      if ( last_button_state[i]) { // button was on but is now off
+        led_3 = true;
+        button_off_time[i] = millis();
+        fuelSignal(i, 0, true);
+        purgeSignal(i, 1, true); 
+      } else { // button was and is off
+        if ( (button_off_time[i] + purge_delay) > millis() && purge_init[i]) {
+          led_3 = true;
+          purgeSignal(i, 1, false);
+        } else {
+          if (! purge_button_pressed ) {
+            purgeSignal(i, 0, true);
+          }
+        }
+      }
     }
-    else if (millis() > deBounceTimeOut[input]){
-      deBounceWait[input] = false;
-      lastState[input] = currentState;
-    }
+    last_button_state[i] = button_pressed;
   }
-  else if (currentState != lastState[input]){
-    deBounceWait[input] = true;
-    deBounceTimeOut[input] = millis() + DEBOUNCEDELAY;
-  }
-  return lastState[input];
+  digitalWrite(LED_1, (activity_until > millis()) ? LOW : HIGH);
+  digitalWrite(LED_2, led_2 ? HIGH : LOW);
+  digitalWrite(LED_3, led_3 ? HIGH : LOW);
 }
-  
 
+void sendSignal(int shooter_idx, String address, int value, unsigned long last_signal_time, boolean now) {
+  // Unless now is true, only send the signal if we've exceeded the signal interval.
+  if ( now || ( (last_signal_time + SIGNAL_INTERVAL) <= millis() ) ) {
+    Serial.print("!" + address);
+    Serial.print(value);
+    Serial.print(".");
+    Serial.print("\n\r");
+    last_signal_sent[shooter_idx] = millis();
+    activity_until = millis() + ACTIVITY_BLINK_TIME;
+  } 
+}
 
+void fuelSignal(int shooter_idx, int value, boolean now) {
+  if ( value != 0 || last_fuel_valve_state[shooter_idx] ) { // "off" signal only sent once"
+    //Serial.println("FIRE");
+    String address = shooters[shooter_idx].fuel_address;
+    unsigned long last_signal_time = last_signal_sent[shooter_idx];
+    sendSignal( shooter_idx, address, value, last_signal_time, now);
+    last_fuel_valve_state[shooter_idx] = (value > 0);
+  }
+}
+
+void purgeSignal(int shooter_idx, int value, boolean now) {
+  if ( value != 0 || last_purge_valve_state[shooter_idx] ) { // "off" signal only sent once"
+    //Serial.println("PURGE");
+    String address = shooters[shooter_idx].purge_address;
+    unsigned long last_signal_time = last_signal_sent[shooter_idx];
+    sendSignal( shooter_idx, address, value, last_signal_time, now);
   
-  
+    last_purge_valve_state[shooter_idx] = (value > 0);
+  }
+}
+
+void purgeAll(boolean now) {
+  for ( int i=0; i<NUM_SHOOTERS; i++) {
+    purgeSignal(i, 1, now);
+  }
+}
+
+int getPurgeDelay() {
+  int knob_value = 1023 - analogRead(PURGE_DELAY_PIN); // invert
+  unsigned long delay = (int)( (knob_value / 1023.0) * (MAX_PURGE_DELAY - MIN_PURGE_DELAY) + MIN_PURGE_DELAY );
+  return delay;
+}
